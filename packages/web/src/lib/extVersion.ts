@@ -12,7 +12,7 @@ export const EXT_ATTR = "data-sixseven-ext";
 /** The latest published extension version. Bump when a new build ships so older
  *  (version-reporting) installs get the "update available" nudge. Legacy `"1"`
  *  builds can't be assessed, so they're never nagged (treated as installed). */
-export const LATEST_EXT_VERSION = "0.2.5";
+export const LATEST_EXT_VERSION = "0.3.0";
 
 export type ExtState = "missing" | "legacy" | "outdated" | "ok";
 

@@ -174,6 +174,34 @@ export interface WidgetProxyResultMessage {
   error?: string;
 }
 
+/** One rendered activity-log line for the in-tab widget's Activity tab. Formatted
+ *  on the hub (it has member names) so the widget just prints it. */
+export interface WidgetActivityLine {
+  id: string;
+  /** Server clock (ms). */
+  at: number;
+  text: string;
+}
+
+/** Hub → satellite (§11): the room's recent activity feed, for the widget's
+ *  Activity tab (joined/left/source/seek/mode…). Pushed on change. */
+export interface WidgetActivityMessage {
+  kind: "widgetActivity";
+  lines: WidgetActivityLine[];
+}
+
+/** Hub → satellite: this viewer's local video has drifted far from the room clock
+ *  (detach). The satellite shows a floating "out of sync — resync" pill OUTSIDE the
+ *  widget panel (so it's visible even when the widget is minimized/closed). The hub
+ *  owns the detection (it knows both this viewer's reported time and the room's
+ *  projected time); the pill only relays a `requestResync` back up. */
+export interface ResyncHintMessage {
+  kind: "resyncHint";
+  show: boolean;
+  /** Signed drift in seconds (+ = ahead of the room), for the pill's label. */
+  drift: number;
+}
+
 export type PageToFrameMessage =
   | HelloMessage
   | ApplyMessage
@@ -185,7 +213,9 @@ export type PageToFrameMessage =
   | WidgetMembersMessage
   | WidgetEventMessage
   | WidgetControlMessage
-  | WidgetProxyResultMessage;
+  | WidgetProxyResultMessage
+  | WidgetActivityMessage
+  | ResyncHintMessage;
 
 // ── frame → page ────────────────────────────────────────────────────────────
 
@@ -260,6 +290,13 @@ export interface WidgetProxyMessage {
   payload: Record<string, unknown>;
 }
 
+/** Satellite → hub: the viewer tapped the "resync me" pill. The hub force-snaps
+ *  this viewer's satellite back to the room clock (a one-way local correction — it
+ *  never touches the room state or other viewers). */
+export interface RequestResyncMessage {
+  kind: "requestResync";
+}
+
 export type FrameToPageMessage =
   | ReadyMessage
   | HookedMessage
@@ -269,7 +306,8 @@ export type FrameToPageMessage =
   | TracksMessage
   | WidgetSayMessage
   | SiteNavigateMessage
-  | WidgetProxyMessage;
+  | WidgetProxyMessage
+  | RequestResyncMessage;
 
 // ── envelope + helpers ──────────────────────────────────────────────────────
 

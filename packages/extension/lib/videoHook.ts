@@ -33,8 +33,16 @@ const SELF_SEEK_QUIET_MS = 1000;
 /** Coalesce DOM-mutation re-hook checks so a churny embed can't thrash the hook. */
 const REHOOK_DEBOUNCE_MS = 400;
 /** A native play/pause/seek within this long of a user gesture is a real user
- *  action (worth syncing); without a recent gesture it's the embed buffering. */
-const GESTURE_WINDOW_MS = 700;
+ *  action (worth syncing); without a recent gesture it's the embed buffering.
+ *  Widened from 700ms because custom players (e.g. cineby) resolve a click into
+ *  the actual `video.play()`/`pause()` asynchronously — buffer, quality switch,
+ *  then play — often well past 700ms, so genuine user toggles were being dropped
+ *  as noise and never reached the room. 1200ms catches those slow players while
+ *  still rejecting buffering/programmatic events that fire with no recent click.
+ *  (The reconcile heartbeat on the hub now also heals any divergence this misses.)
+ *  Don't widen much further without real-embed testing — too wide re-admits a
+ *  site's own ad/quality pause that lands shortly after an unrelated click. */
+const GESTURE_WINDOW_MS = 1200;
 // Multi-viewer drift correction (heartbeat ticks): glide via a small playbackRate
 // slew instead of a hard seek (the black-screen jump). Mirrors WebPlayer.
 const NUDGE_ZONE = 0.4;
@@ -317,7 +325,19 @@ export class VideoHook {
         this.expectPlay = false;
         return;
       }
-      if (this.userActedRecently()) this.maybeLocalIntent("playing");
+      if (this.userActedRecently()) {
+        this.maybeLocalIntent("playing");
+        return;
+      }
+      // A non-gesture play while the room wants us PAUSED = the site auto-resuming
+      // its own player (cineby et al.). It isn't a user action (don't report it),
+      // and we must not let it run away: re-assert the paused state locally and
+      // immediately, so the viewer sees a prompt pause "at that second" instead of
+      // the hub-timed "play a bit → snap back" loop. (§11/§16: a foreign player
+      // fighting our clock — we hold our state, we don't fight the site otherwise.)
+      if (this.last && (this.last.intent !== "playing" || this.last.gatePaused)) {
+        this.reassertPaused();
+      }
     });
     on("pause", () => {
       if (this.expectPause) {
@@ -370,6 +390,28 @@ export class VideoHook {
     // and forth forever (the play/pause flood).
     if (this.last && intent === this.last.intent) return;
     this.onLocalControl(intent, this.video.currentTime);
+  }
+
+  /** The site auto-resumed a video the room wants paused — pin it back to the
+   *  room's frame at once. We seek only if it actually crept (the `play` event
+   *  fires at play-start, so usually it hasn't yet → a plain pause, no flash).
+   *  The self-mutation is flagged so the resulting echo events aren't misread. */
+  private reassertPaused(): void {
+    const v = this.video;
+    if (!v || !this.last) return;
+    this.applying = true;
+    if (Math.abs(v.currentTime - this.last.time) > DRIFT_THRESHOLD) {
+      this.expectSeek = this.last.time;
+      this.selfSeekAt = performance.now();
+      v.currentTime = this.last.time;
+    }
+    if (!v.paused) {
+      this.expectPause = true;
+      v.pause();
+    }
+    setTimeout(() => {
+      this.applying = false;
+    }, 50);
   }
 
   // ── status / buffer gate (SPEC §9) ──────────────────────────────────────────

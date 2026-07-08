@@ -92,6 +92,9 @@ interface StoredMember {
   name: string;
   status: MemberStatus;
   joinSeq: number;
+  /** Last-reported local playback position (seconds), for the per-member presence
+   *  view. Ephemeral (not worth persisting) — a fresh status re-reports it. */
+  time?: number;
   /** In the video call (§17), and publishing-camera hint. Ephemeral — reset on (re)join. */
   inCall?: boolean;
   cam?: boolean;
@@ -306,7 +309,7 @@ export class RoomServer extends Server<Env> {
       case "passControl":
         return this.handlePassControl(sender, msg.toId);
       case "status":
-        return this.handleStatus(sender, msg.state);
+        return this.handleStatus(sender, msg.state, msg.time);
       case "skip":
         return this.handleSkip(sender, msg.memberId);
       case "resync":
@@ -687,9 +690,22 @@ export class RoomServer extends Server<Env> {
     await this.persist();
   }
 
-  private async handleStatus(sender: Connection, state: MemberStatus): Promise<void> {
+  private async handleStatus(
+    sender: Connection,
+    state: MemberStatus,
+    time?: number,
+  ): Promise<void> {
     const member = this.s.members[sender.id];
     if (!member) return;
+    if (typeof time === "number" && Number.isFinite(time)) member.time = time;
+
+    // Time-only update (same readiness): refresh the presence view without the
+    // gate-recompute / persist / heartbeat churn a real state change triggers.
+    // `time` is ephemeral, so there's nothing worth persisting.
+    if (state === member.status) {
+      this.broadcastMembers();
+      return;
+    }
     member.status = state;
 
     const blocking = state === "stalled" || state === "failed";
@@ -914,6 +930,7 @@ export class RoomServer extends Server<Env> {
       id,
       name: m.name,
       status: m.status,
+      time: m.time,
       inCall: m.inCall ?? false,
       cam: m.cam ?? false,
     }));

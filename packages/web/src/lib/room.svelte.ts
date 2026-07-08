@@ -151,8 +151,8 @@ export class RoomClient {
   skip(memberId: MemberId): void {
     this.send({ type: "skip", memberId });
   }
-  reportStatus(state: Member["status"]): void {
-    this.send({ type: "status", state });
+  reportStatus(state: Member["status"], time?: number): void {
+    this.send({ type: "status", state, time });
   }
   /** Ask the server for a freshly-projected `sync` (e.g. when a frame newly hooks). */
   resync(): void {

@@ -39,6 +39,16 @@ function isTextField(node: EventTarget | undefined): boolean {
 /** Pixel movement before a header press counts as a drag (else it's a tap → hide). */
 const DRAG_THRESHOLD = 5;
 
+/** Seconds → [h:]mm:ss for the per-member position readout. */
+function fmtClock(t: number): string {
+  const s = Math.max(0, Math.floor(t));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const mm = h ? String(m).padStart(2, "0") : String(m);
+  return `${h ? `${h}:` : ""}${mm}:${String(sec).padStart(2, "0")}`;
+}
+
 export interface GifHit {
   id: string;
   url: string;
@@ -82,7 +92,14 @@ interface ChatLine {
   text: string;
   self: boolean;
 }
-type Tab = "chat" | "gif" | "subs";
+interface ActivityLine {
+  id: string;
+  at: number;
+  text: string;
+}
+/** Two groups: interaction (chat/gif) and player (subs/activity). */
+type Tab = "chat" | "gif" | "subs" | "activity";
+const TABS: Tab[] = ["chat", "gif", "subs", "activity"];
 
 export class SiteWidget {
   private host: HTMLDivElement;
@@ -90,6 +107,9 @@ export class SiteWidget {
   private chat: ChatLine[] = [];
   private seq = 0;
   private tab: Tab = "chat";
+  private activity: ActivityLine[] = [];
+  private members: Member[] = [];
+  private selfId: MemberId | null = null;
   private gifTab: "search" | "favs" = "search";
   private tracks: TrackInfo[] = [];
   private subLabel: string | null = null;
@@ -166,7 +186,9 @@ export class SiteWidget {
     this.wireSubs();
     void this.loadFavs();
     this.renderMembers([], null);
+    this.renderWatchers();
     this.renderFeed();
+    this.renderActivity();
     this.renderGif();
     this.renderTracks();
     this.renderSubLabel();
@@ -177,11 +199,19 @@ export class SiteWidget {
     document.documentElement.append(this.host);
   }
   setMembers(members: Member[], self: MemberId | null): void {
+    this.members = members;
+    this.selfId = self;
     this.renderMembers(members, self);
+    this.renderWatchers();
   }
   addChat(name: string, text: string, self: boolean): void {
     this.chat = [...this.chat, { id: this.seq++, name, text, self }].slice(-80);
     this.renderFeed();
+  }
+  /** Replace the Activity feed (room events: joined/left/source/seek/mode…). */
+  setActivity(lines: ActivityLine[]): void {
+    this.activity = lines;
+    this.renderActivity();
   }
   setTracks(tracks: TrackInfo[]): void {
     this.tracks = tracks;
@@ -362,7 +392,7 @@ export class SiteWidget {
   // ── tabs ──────────────────────────────────────────────────────────────────────
 
   private wireTabs(): void {
-    for (const t of ["chat", "gif", "subs"] as Tab[]) {
+    for (const t of TABS) {
       this.q<HTMLButtonElement>(`.tabs [data-tab="${t}"]`).addEventListener("click", () =>
         this.setTab(t),
       );
@@ -370,7 +400,7 @@ export class SiteWidget {
   }
   private setTab(t: Tab): void {
     this.tab = t;
-    for (const k of ["chat", "gif", "subs"] as Tab[]) {
+    for (const k of TABS) {
       this.q(`.tabs [data-tab="${k}"]`).classList.toggle("on", k === t);
       this.q(`.pane.${k}`).hidden = k !== t;
     }
@@ -617,6 +647,54 @@ export class SiteWidget {
     }
     el.scrollTop = el.scrollHeight;
   }
+  /** "Who's watching" + each viewer's position — the player-state half of the
+   *  Activity tab. Absolute mm:ss (drift vs the room is surfaced to the affected
+   *  viewer by the resync pill, which doesn't need the room clock here). */
+  private renderWatchers(): void {
+    const el = this.q(".watchers");
+    el.replaceChildren();
+    if (!this.members.length) {
+      el.append(this.note("connecting…"));
+      return;
+    }
+    for (const m of this.members) {
+      const row = document.createElement("div");
+      row.className = "wrow";
+      const dot = document.createElement("span");
+      dot.className = `dot ${m.status}`;
+      const name = document.createElement("span");
+      name.className = "wname";
+      name.textContent = m.id === this.selfId ? `${m.name} (you)` : m.name;
+      const pos = document.createElement("span");
+      pos.className = "wpos";
+      pos.textContent = m.status === "ready" && m.time != null ? fmtClock(m.time) : m.status;
+      row.append(dot, name, pos);
+      el.append(row);
+    }
+  }
+  private renderActivity(): void {
+    const el = this.q(".actfeed");
+    el.replaceChildren();
+    if (!this.activity.length) {
+      el.append(this.note("No activity yet."));
+      return;
+    }
+    // Newest first, like the web sidebar.
+    for (const a of [...this.activity].reverse()) {
+      const line = document.createElement("div");
+      line.className = "actline";
+      const time = document.createElement("span");
+      time.className = "acttime";
+      time.textContent = new Date(a.at).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+      const text = document.createElement("span");
+      text.textContent = a.text;
+      line.append(time, text);
+      el.append(line);
+    }
+  }
 
   // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -658,10 +736,20 @@ export class SiteWidget {
         .m { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; }
         .dot { width: 7px; height: 7px; border-radius: 50%; background: #9aa0b4; }
         .dot.ready { background: #41d18a; } .dot.stalled { background: #f5a623; } .dot.failed { background: #ff5d6c; }
-        .tabs, .giftabs { display: flex; border-bottom: 1px solid #2a2e3d; }
+        .tabs, .giftabs { display: flex; align-items: stretch; border-bottom: 1px solid #2a2e3d; }
+        .tabgroup { display: flex; flex: 1; }
+        .tabsep { width: 1px; align-self: center; height: 16px; background: #2a2e3d; }
         .tabs button, .giftabs button { flex: 1; border: 0; background: none; color: #9aa0b4; font: inherit;
           font-size: 12px; padding: 6px 0; cursor: pointer; border-bottom: 2px solid transparent; }
         .tabs button.on, .giftabs button.on { color: #e7e9ef; border-bottom-color: #6c7cff; }
+        .watchers { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border-bottom: 1px solid #2a2e3d; }
+        .wrow { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+        .wname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .wpos { flex: none; color: #9aa0b4; font-size: 11px; font-variant-numeric: tabular-nums; }
+        .actlabel { padding: 7px 10px 0; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: #9aa0b4; }
+        .actfeed { flex: 1; overflow-y: auto; padding: 6px 10px 8px; display: flex; flex-direction: column; gap: 5px; min-height: 48px; max-height: 34vh; }
+        .actline { display: flex; gap: 8px; font-size: 12px; color: #e7e9ef; }
+        .acttime { flex: none; color: #9aa0b4; font-size: 11px; font-variant-numeric: tabular-nums; padding-top: 1px; }
         .section { flex: 1; overflow-y: auto; min-height: 60px; }
         .pane { display: flex; flex-direction: column; }
         .pane[hidden], [hidden] { display: none !important; }
@@ -672,7 +760,9 @@ export class SiteWidget {
         .react { display: flex; gap: 3px; padding: 6px 10px; border-top: 1px solid #2a2e3d; }
         .react button { flex: 1; border: 0; background: #1f2230; border-radius: 6px; cursor: pointer; font-size: 14px; padding: 3px 0; }
         .react button:hover { background: #2a2e3d; }
-        .chatrow, .gifsearch, .subsearch { display: flex; gap: 6px; padding: 7px 10px; border-top: 1px solid #2a2e3d; }
+        .chatrow, .subsearch { display: flex; gap: 6px; padding: 7px 10px; border-top: 1px solid #2a2e3d; }
+        /* GIF search sits ABOVE its results (it's the input you act on first). */
+        .gifsearch { display: flex; gap: 6px; padding: 7px 10px; }
         input, select { font: inherit; color: #e7e9ef; background: #0e0f13; border: 1px solid #2a2e3d; border-radius: 6px; padding: 5px 7px; min-width: 0; }
         .chatrow input, .gifsearch input, .subsearch input { flex: 1; }
         .send { border: 0; background: #6c7cff; color: #fff; border-radius: 6px; padding: 5px 10px; cursor: pointer; font: inherit; }
@@ -721,7 +811,13 @@ export class SiteWidget {
         <div class="members"></div>
         <button class="playpage" hidden>▶ Play this page for everyone</button>
         <div class="tabs">
-          <button data-tab="chat">Chat</button><button data-tab="gif">GIF</button><button data-tab="subs">Subs</button>
+          <span class="tabgroup">
+            <button data-tab="chat">Chat</button><button data-tab="gif">GIF</button>
+          </span>
+          <span class="tabsep"></span>
+          <span class="tabgroup">
+            <button data-tab="subs">Subs</button><button data-tab="activity">Activity</button>
+          </span>
         </div>
         <div class="section">
           <div class="pane chat">
@@ -731,8 +827,13 @@ export class SiteWidget {
           </div>
           <div class="pane gif" hidden>
             <div class="giftabs"><button data-g="search">Search</button><button data-g="favs">★ Favorites</button></div>
-            <div class="gifgrid"></div>
             <div class="gifsearch"><input type="text" placeholder="search GIPHY…" /><button class="send">go</button></div>
+            <div class="gifgrid"></div>
+          </div>
+          <div class="pane activity" hidden>
+            <div class="watchers"></div>
+            <div class="actlabel">Activity</div>
+            <div class="actfeed"></div>
           </div>
           <div class="pane subs" hidden>
             <div class="row"><label class="up">Upload .srt/.vtt<input class="subupload" type="file" accept=".srt,.vtt,text/vtt" /></label></div>

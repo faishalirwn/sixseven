@@ -21,6 +21,7 @@ import {
   type SubtitleCue,
   type SubtitleStyle,
   type TrackInfo,
+  type WidgetActivityLine,
   type WidgetProxyOp,
   unwrap,
   wrap,
@@ -58,6 +59,8 @@ export interface BridgeCallbacks {
   onSiteNavigate: ((url: string) => void) | null;
   /** The site widget asked the hub to run a member-gated proxy op (§11). */
   onProxy: ((reqId: number, op: WidgetProxyOp, payload: Record<string, unknown>) => void) | null;
+  /** The satellite tapped the "resync me" pill — force-snap it to the room clock. */
+  onRequestResync: (() => void) | null;
 }
 
 /** Build the `apply` command from the latest server truth — shared by both transports. */
@@ -103,6 +106,9 @@ function dispatchFrameMessage(msg: FrameToPageMessage, cb: BridgeCallbacks): voi
       break;
     case "widgetProxy":
       cb.onProxy?.(msg.reqId, msg.op, msg.payload);
+      break;
+    case "requestResync":
+      cb.onRequestResync?.();
       break;
   }
 }
@@ -225,6 +231,7 @@ export class CrossTabBridge {
     onSay: null,
     onSiteNavigate: null,
     onProxy: null,
+    onRequestResync: null,
   };
   /** Lifecycle of the satellite tab (open / closed / not-yet-opened). */
   onSatelliteState: ((state: SatelliteStateMessage["state"]) => void) | null = null;
@@ -308,9 +315,17 @@ export class CrossTabBridge {
   pushEvent(ev: WidgetEvent): void {
     this.down({ kind: "widgetEvent", ...ev });
   }
+  /** Push the room's recent activity feed down to the widget's Activity tab. */
+  pushActivity(lines: WidgetActivityLine[]): void {
+    this.down({ kind: "widgetActivity", lines });
+  }
   /** Reply to a widget proxy RPC (§11), matched by reqId. */
   pushProxyResult(reqId: number, ok: boolean, result?: unknown, error?: string): void {
     this.down({ kind: "widgetProxyResult", reqId, ok, result, error });
+  }
+  /** Show/hide the satellite's floating "out of sync — resync" pill. */
+  resyncHint(show: boolean, drift: number): void {
+    this.down({ kind: "resyncHint", show, drift });
   }
 
   private down(msg: PageToFrameMessage): void {
@@ -343,6 +358,7 @@ export class RoomBridge implements BridgeCallbacks {
   onSiteNavigate: ((url: string) => void) | null = null;
   onProxy: ((reqId: number, op: WidgetProxyOp, payload: Record<string, unknown>) => void) | null =
     null;
+  onRequestResync: (() => void) | null = null;
   /** Satellite tab lifecycle (only meaningful for `site`). */
   onSatelliteState: ((state: SatelliteStateMessage["state"]) => void) | null = null;
 
@@ -363,6 +379,7 @@ export class RoomBridge implements BridgeCallbacks {
       onSay: (k, t) => this.onSay?.(k, t),
       onSiteNavigate: (u) => this.onSiteNavigate?.(u),
       onProxy: (id, op, p) => this.onProxy?.(id, op, p),
+      onRequestResync: () => this.onRequestResync?.(),
     };
     this.page.onReady = fwd.onReady;
     this.page.onHooked = fwd.onHooked;
@@ -435,9 +452,17 @@ export class RoomBridge implements BridgeCallbacks {
   pushEvent(ev: WidgetEvent): void {
     if (this.kind === "site") this.cross.pushEvent(ev);
   }
+  /** Site only — push the room's activity feed to the widget's Activity tab. */
+  pushActivity(lines: WidgetActivityLine[]): void {
+    if (this.kind === "site") this.cross.pushActivity(lines);
+  }
   /** Site only — reply to a widget proxy RPC. */
   pushProxyResult(reqId: number, ok: boolean, result?: unknown, error?: string): void {
     if (this.kind === "site") this.cross.pushProxyResult(reqId, ok, result, error);
+  }
+  /** Site only — show/hide the satellite's floating "out of sync — resync" pill. */
+  resyncHint(show: boolean, drift: number): void {
+    if (this.kind === "site") this.cross.resyncHint(show, drift);
   }
 
   destroy(): void {

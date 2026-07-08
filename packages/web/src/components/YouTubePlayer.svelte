@@ -24,6 +24,8 @@
   let loadError = $state<string | null>(null);
   let muted = $state(true);
   let cueText = $state<string | null>(null);
+  // When the current sync arrived, to project the room clock forward for a resync.
+  let syncAt = 0;
 
   const videoId = $derived(parseYouTubeId(src));
 
@@ -95,8 +97,20 @@
     if (sync === lastSync && gate.paused === lastPaused) return;
     lastSync = sync;
     lastPaused = gate.paused;
+    syncAt = performance.now();
     p.apply(sync, gate);
   });
+
+  /** Force-snap this viewer to the room clock (self-resync). One-way — it seeks
+   *  the local player to the server's projected position, relays nothing. */
+  export function resyncNow() {
+    const p = player;
+    if (!p || !sync) return;
+    const playing = sync.intent === "playing" && !gate.paused;
+    const want =
+      sync.time + (playing ? ((performance.now() - syncAt) / 1000) * (sync.rate || 1) : 0);
+    p.apply({ ...sync, time: want, force: true }, gate);
+  }
 
   // Subtitle overlay ticker (our personal cues, over the player).
   $effect(() => {

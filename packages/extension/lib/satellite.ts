@@ -67,6 +67,10 @@ export class SatelliteController {
   // the in-tab widget (some viewers don't want it overlaying the video).
   private widgetHidden = false;
   private memberCount = 0;
+  // Floating "out of sync — resync" pill (hub-driven). Lives OUTSIDE the widget
+  // panel (its own Shadow host) so it's visible even when the widget is minimized
+  // or hidden — the whole point is that a detached viewer always sees it.
+  private resyncPill: { host: HTMLDivElement; label: HTMLSpanElement } | null = null;
 
   constructor(private readonly room: string) {
     this.widget = new SiteWidget({
@@ -189,6 +193,7 @@ export class SatelliteController {
     for (const p of this.pending.values()) p.reject(new Error("closed"));
     this.pending.clear();
     window.removeEventListener("message", this.onFrameMessage);
+    this.hideResyncPill();
     this.hook.destroy();
     this.subtitles.destroy();
     this.reactions.destroy();
@@ -249,6 +254,9 @@ export class SatelliteController {
         this.roomSrc = msg.roomSrc;
         this.refreshPlayPage();
         break;
+      case "widgetActivity":
+        this.widget.setActivity(msg.lines);
+        break;
       case "widgetEvent":
         if (msg.sayKind === "chat") {
           this.widget.addChat(msg.name, msg.text, msg.self);
@@ -268,7 +276,50 @@ export class SatelliteController {
         }
         break;
       }
+      case "resyncHint":
+        if (msg.show) this.showResyncPill(msg.drift);
+        else this.hideResyncPill();
+        break;
     }
+  }
+
+  // ── out-of-sync pill (hub-driven; own Shadow host, panel-independent) ─────────
+
+  private showResyncPill(drift: number): void {
+    const behind = drift < 0;
+    const secs = Math.abs(Math.round(drift));
+    if (!this.resyncPill) {
+      const host = document.createElement("div");
+      host.style.cssText =
+        "position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:2147483647;";
+      const root = host.attachShadow({ mode: "open" });
+      root.innerHTML = `
+        <style>
+          .pill { display:inline-flex; align-items:center; gap:9px; padding:7px 8px 7px 14px;
+            border-radius:999px; background:#f5a623; color:#111; font:13px/1.3 system-ui,sans-serif;
+            box-shadow:0 6px 22px #0007; white-space:nowrap; }
+          .go { border:0; border-radius:999px; background:#111; color:#fff; font:inherit; font-weight:600;
+            padding:4px 12px; cursor:pointer; }
+          .go:hover { background:#000; }
+          .x { border:0; border-radius:50%; width:24px; height:24px; background:#0002; color:#111;
+            cursor:pointer; font-size:13px; line-height:1; }
+          .x:hover { background:#0004; }
+        </style>
+        <div class="pill"><span class="lbl"></span><button class="go" type="button">Resync me</button><button class="x" type="button" title="Dismiss">✕</button></div>`;
+      const label = root.querySelector(".lbl") as HTMLSpanElement;
+      root.querySelector(".go")?.addEventListener("click", () => {
+        this.sendUp({ kind: "requestResync" });
+        this.hideResyncPill(); // optimistic; the hub also pushes hide once snapped
+      });
+      root.querySelector(".x")?.addEventListener("click", () => this.hideResyncPill());
+      document.documentElement.append(host);
+      this.resyncPill = { host, label };
+    }
+    this.resyncPill.label.textContent = `You're ${secs}s ${behind ? "behind" : "ahead of"} the room`;
+  }
+  private hideResyncPill(): void {
+    this.resyncPill?.host.remove();
+    this.resyncPill = null;
   }
 
   // ── subtitles (local layer + nested-frame relay) ──────────────────────────────

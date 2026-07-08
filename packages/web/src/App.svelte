@@ -7,6 +7,7 @@
     MonitorPlay,
     PanelRightClose,
     PanelRightOpen,
+    RotateCw,
     Share2,
     SmilePlus,
     Users,
@@ -39,6 +40,7 @@
     saveNickname,
   } from "./lib/session";
   import { classifySource, extractSourceUrl } from "./lib/source";
+  import { describeLog } from "./lib/activity";
   import { extState, LATEST_EXT_VERSION } from "./lib/extVersion";
   import { SubtitleController } from "./lib/subtitleController.svelte";
 
@@ -109,10 +111,15 @@
   // wondering what's happening. Cleared on src change; set in noteEmbedReady().
   let embedReady = $state(false);
 
-  function report(state: MemberStatus) {
-    if (state === lastStatus) return;
+  let lastStatusSentAt = 0;
+  function report(state: MemberStatus, time?: number) {
+    const now = performance.now();
+    // Send immediately on a readiness change; otherwise refresh our position every
+    // ~2s so the per-member presence view stays current without flooding the WS.
+    if (state === lastStatus && now - lastStatusSentAt < 2000) return;
     lastStatus = state;
-    room?.reportStatus(state);
+    lastStatusSentAt = now;
+    room?.reportStatus(state, time);
   }
   function clearFailTimer() {
     if (failTimer) {
@@ -151,7 +158,7 @@
       embedFailed = false;
     }
     playerStatus = state;
-    report(state);
+    report(state, currentTime);
     pos = { t: currentTime, dur: duration, at: performance.now() };
   }
   function onLocalControlReport(intent: Intent, time: number) {
@@ -240,6 +247,8 @@
       s.resend();
     };
     b.onLocalControl = onLocalControlReport;
+    // Site (§11): the satellite tapped its "resync me" pill → force-snap it back.
+    b.onRequestResync = resyncNow;
     b.onEnded = onEnded; // embed/site video ended → playlist auto-advance (§16)
     b.onTracks = (tracks) => s.setTracks(tracks); // source's own caption tracks (§13)
     // Site source (§11): the satellite tab's lifecycle drives the SiteSatellite UI.
@@ -256,6 +265,8 @@
         // right away (the change-driven effects won't fire just because it opened).
         b.pushMembers($state.snapshot(r.members), r.self);
         b.widgetControl(r.canControl, r.sync?.src ?? null);
+        const members = $state.snapshot(r.members);
+        b.pushActivity(r.log.slice(-40).map((e) => ({ id: e.id, at: e.at, text: describeLog(e, members) })));
       }
     };
     // Site source (§11): the in-tab widget's chat/reaction → relay to the room.
@@ -392,6 +403,16 @@
     if (sourceKind !== "site" || !room || !bridge) return;
     bridge.pushMembers($state.snapshot(room.members), room.self);
   });
+  // Site (§11): mirror the room's activity feed into the in-tab widget's Activity
+  // tab. Formatted here (the hub has member names) so the widget just prints it.
+  $effect(() => {
+    if (sourceKind !== "site" || !room || !bridge) return;
+    const members = $state.snapshot(room.members);
+    const lines = room.log
+      .slice(-40)
+      .map((e) => ({ id: e.id, at: e.at, text: describeLog(e, members) }));
+    bridge.pushActivity(lines);
+  });
   // Site (§11): tell the in-tab widget whether THIS viewer may change the source +
   // the room's current source URL, so it can offer "Play this page for everyone"
   // only when you're on a different page and allowed to push it (control mode).
@@ -443,6 +464,42 @@
     lastAppliedSync = sync;
     lastGatePaused = paused;
     bridge.apply(sync, room.gate, room.members.length <= 1);
+  });
+
+  // Reconcile heartbeat (embed + site): the server only heartbeats `sync` while
+  // PLAYING, and the cross-tab/iframe relay can silently drop a message — so a
+  // satellite/iframe that drifts (the site resumes on its own with no gesture to
+  // report, or a relay gap) can stay detached with nothing to correct it. Re-push
+  // the room's *projected* truth as a `force:false` tick: an in-sync viewer
+  // no-ops/glides, a detached one snaps back (>3s). Skipped when solo (nobody to
+  // sync with) and while reconnecting. Direct/youtube don't need this — they play
+  // in our own element with no relay and no foreign player.
+  //
+  // Cadence: slow + gentle (`force:false`) while PLAYING (the server already
+  // heartbeats every 3s). While PAUSED, tick fast and `force:true` so the frame is
+  // PINNED to the room's position — a site that auto-resumes a paused video
+  // (cineby) is snapped back exactly, not left to creep. Updated extensions also
+  // re-pause locally the instant the site resumes (VideoHook.reassertPaused), so
+  // this hub tick is mainly the pin for un-updated extensions + a relay-gap
+  // backstop; force:true is harmless when the video is already on-frame (no seek).
+  const RECONCILE_PLAY_MS = 4000;
+  const RECONCILE_PAUSE_MS = 1500;
+  $effect(() => {
+    if (sourceKind !== "embed" && sourceKind !== "site") return;
+    let timer: ReturnType<typeof setTimeout>;
+    const tick = () => {
+      const r = room;
+      let delay = RECONCILE_PLAY_MS;
+      if (r?.sync && r.connected && bridge && r.members.length > 1) {
+        const want = projectedWant();
+        const playing = r.sync.intent === "playing" && !r.gate.paused;
+        if (want !== null) bridge.apply({ ...r.sync, time: want, force: !playing }, r.gate, false);
+        delay = playing ? RECONCILE_PLAY_MS : RECONCILE_PAUSE_MS;
+      }
+      timer = setTimeout(tick, delay);
+    };
+    timer = setTimeout(tick, RECONCILE_PAUSE_MS);
+    return () => clearTimeout(timer);
   });
 
   // HUD: stamp when each sync arrives, then project both clocks on a small timer.
@@ -648,6 +705,122 @@
     volume = v;
     muted = v === 0;
   }
+
+  // ── self-resync + out-of-sync detection ─────────────────────────────────────
+  // A viewer's local player can silently drift from the room clock — the site
+  // resumes on its own (no gesture to report), a relay gap drops a command, a
+  // buffer never recovers. When that happens we surface a prominent "resync me"
+  // affordance and let the viewer snap back to the room WITHOUT touching anyone
+  // else's playback (one-way, local). Detection lives here on the hub because it
+  // already knows both this viewer's real position (`pos`, reported by whichever
+  // player) and the room's projected position — for every source kind.
+  const OUT_OF_SYNC_S = 4; // |drift| beyond this (s) counts as out of sync
+  const OUT_OF_SYNC_HOLD_MS = 3500; // sustained this long before nagging (skip buffering blips)
+  // Signed drift (+ = ahead of the room) while the nudge is showing, else null.
+  let outOfSync = $state<number | null>(null);
+  // Where the room clock is *now* (projected), refreshed on the detection tick —
+  // shared with the Members list so it can show each viewer's position vs. the room.
+  let roomNow = $state<number | null>(null);
+  let badSince = 0;
+  // The viewer dismissed this episode's nudge — re-armed once they're back in sync.
+  let resyncDismissed = $state(false);
+  // Handles to the direct/youtube players so a resync can force-snap them (embed +
+  // site go through the bridge instead). Set by bind:this.
+  let directPlayer = $state<{ resyncNow: () => void } | null>(null);
+  let ytPlayer = $state<{ resyncNow: () => void } | null>(null);
+
+  // Where the room clock says we should be *now* (projected from the last sync).
+  function projectedWant(): number | null {
+    const r = room;
+    if (!r?.sync) return null;
+    const sync = r.sync;
+    const playing = sync.intent === "playing" && !r.gate.paused;
+    const rate = sync.rate || 1;
+    return sync.time + (playing ? ((performance.now() - syncAt) / 1000) * rate : 0);
+  }
+
+  // Site only — mirror the nudge into the satellite tab so it shows there too
+  // (the viewer is watching in that tab, not on the hub). The bridge no-ops for
+  // other kinds. Old published extensions ignore the message (additive).
+  function pushResyncHint(show: boolean, drift: number) {
+    if (sourceKind === "site") bridge?.resyncHint(show, drift);
+  }
+
+  // One-way force-snap this viewer's player to the room clock. Emits no command,
+  // so other viewers are untouched (exactly "resync me, not everyone").
+  function resyncNow() {
+    const r = room;
+    if (!r?.sync) return;
+    if (sourceKind === "direct") directPlayer?.resyncNow();
+    else if (sourceKind === "youtube") ytPlayer?.resyncNow();
+    else {
+      // embed + site: re-apply the room truth as a forced snap over the bridge.
+      const want = projectedWant();
+      if (want === null) return;
+      const forced: SyncMessage = { ...r.sync, time: want, force: true };
+      bridge?.apply(forced, r.gate, r.members.length <= 1);
+    }
+    badSince = 0;
+    resyncDismissed = false;
+    if (outOfSync !== null) {
+      outOfSync = null;
+      pushResyncHint(false, 0);
+    }
+  }
+  function dismissResync() {
+    resyncDismissed = true;
+    if (outOfSync !== null) {
+      outOfSync = null;
+      pushResyncHint(false, 0);
+    }
+  }
+
+  $effect(() => {
+    const id = setInterval(() => {
+      const r = room;
+      const sync = r?.sync;
+      roomNow = projectedWant(); // where the room is now, for the members view
+      const playing = !!sync && sync.intent === "playing" && !r!.gate.paused;
+      // Nag whenever we can compare: connected, a source, not solo, and we've
+      // received at least one position report. This covers PAUSED too — a follower
+      // whose video keeps creeping (a site that auto-resumes) is out of sync even
+      // though the room clock is frozen. `want` handles both (frozen when paused).
+      if (!r || !sync || !sync.src || !r.connected || r.members.length <= 1 || !pos.at) {
+        badSince = 0;
+        if (outOfSync !== null) {
+          outOfSync = null;
+          pushResyncHint(false, 0);
+        }
+        return;
+      }
+      const want = projectedWant();
+      if (want === null) return;
+      const rate = sync.rate || 1;
+      // Project our position forward only while playing; when paused the video
+      // shouldn't advance, so trust the last reported position as-is.
+      const t = pos.t + (playing ? ((performance.now() - pos.at) / 1000) * rate : 0);
+      const drift = t - want;
+      const now = performance.now();
+      if (Math.abs(drift) > OUT_OF_SYNC_S) {
+        if (!badSince) badSince = now;
+        if (now - badSince >= OUT_OF_SYNC_HOLD_MS && !resyncDismissed) {
+          // Update on first trip or when the number moves enough to matter.
+          if (outOfSync === null || Math.abs(drift - outOfSync) > 1) {
+            outOfSync = drift;
+            pushResyncHint(true, drift);
+          }
+        }
+      } else {
+        badSince = 0;
+        resyncDismissed = false; // recovered → re-arm for the next episode
+        if (outOfSync !== null) {
+          outOfSync = null;
+          pushResyncHint(false, 0);
+        }
+      }
+    }, 500);
+    return () => clearInterval(id);
+  });
 </script>
 
 {#if !loc.room}
@@ -709,6 +882,11 @@
           <Video size={16} /> {callLive && !showCall ? "Join call" : "Call"}
           {#if callLive}<span class="call-dot" aria-hidden="true"></span>{/if}
         </button>
+        {#if room.sync?.src && room.members.length > 1}
+          <button class="tb icon-only" onclick={resyncNow} title="Resync me to the room (only affects you)">
+            <RotateCw size={16} />
+          </button>
+        {/if}
         <button class="tb" onclick={copyInvite} title="Copy the invite link">
           <Share2 size={16} /> Invite
         </button>
@@ -754,6 +932,7 @@
           </div>
         {:else if sourceKind === "direct"}
           <DirectPlayer
+            bind:this={directPlayer}
             src={room.sync.src}
             sync={room.sync}
             gate={room.gate}
@@ -767,6 +946,7 @@
           />
         {:else if sourceKind === "youtube"}
           <YouTubePlayer
+            bind:this={ytPlayer}
             src={room.sync.src}
             sync={room.sync}
             gate={room.gate}
@@ -828,6 +1008,18 @@
             {room.sync?.intent}{room.gate.paused ? " · GATED" : ""}{room.members.length <= 1
               ? " · solo"
               : ` · ${room.members.length}`}
+          </div>
+        {/if}
+
+        {#if outOfSync !== null}
+          <div class="resync-pill" role="alert">
+            <RotateCw size={15} />
+            <span
+              >You're <strong>{Math.abs(Math.round(outOfSync))}s</strong>
+              {outOfSync > 0 ? "ahead of" : "behind"} the room</span
+            >
+            <button class="rp-go" onclick={resyncNow}>Resync me</button>
+            <button class="rp-x" onclick={dismissResync} aria-label="Dismiss"><X size={14} /></button>
           </div>
         {/if}
 
@@ -893,7 +1085,7 @@
 
     {#if sidebarOpen}
       <aside>
-        <Members {room} onInvite={copyInvite} />
+        <Members {room} {roomNow} onResync={resyncNow} onInvite={copyInvite} />
         <div class="side-tabs">
           <button class:on={sideTab === 'chat'} onclick={() => (sideTab = 'chat')}>Chat</button>
           <button class:on={sideTab === 'activity'} onclick={() => (sideTab = 'activity')}>Activity</button>
@@ -1246,6 +1438,67 @@
   .toast.bad {
     background: color-mix(in srgb, var(--bad) 90%, #000);
     color: #fff;
+  }
+  /* Out-of-sync nudge — deliberately prominent, above the video and every panel,
+     so it's seen whatever tab/panel the viewer has open. */
+  .resync-pill {
+    position: absolute;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 40;
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    max-width: calc(100% - 24px);
+    padding: 7px 8px 7px 14px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--warn) 90%, #000);
+    color: #000;
+    font-size: 13px;
+    box-shadow: 0 6px 22px rgba(0, 0, 0, 0.45);
+    animation: rp-in 0.18s ease-out;
+  }
+  .resync-pill strong {
+    font-weight: 700;
+  }
+  .rp-go {
+    border: 0;
+    border-radius: 999px;
+    background: #000;
+    color: #fff;
+    font: inherit;
+    font-weight: 600;
+    padding: 4px 12px;
+    cursor: pointer;
+  }
+  .rp-go:hover {
+    background: #1a1a1a;
+  }
+  .rp-x {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-radius: 50%;
+    width: 24px;
+    height: 24px;
+    background: rgba(0, 0, 0, 0.12);
+    color: #000;
+    cursor: pointer;
+  }
+  .rp-x:hover {
+    background: rgba(0, 0, 0, 0.24);
+  }
+  @keyframes rp-in {
+    from {
+      opacity: 0;
+      transform: translate(-50%, -6px);
+    }
+    to {
+      opacity: 1;
+      transform: translate(-50%, 0);
+    }
   }
   .banner {
     position: absolute;

@@ -30,6 +30,11 @@ export interface Member {
   id: MemberId;
   name: string;
   status: MemberStatus;
+  /** This member's last-reported local playback position (seconds). Presence-only
+   *  and ephemeral (never persisted) — lets the room show who's actually where and
+   *  surface a viewer who has detached from the room clock. Absent until reported
+   *  (older clients don't send it). */
+  time?: number;
   /** In the video call (§17): receiving, and reachable for WebRTC. Drives who
    *  others open a peer connection to. Capped server-side. You can be in the
    *  call WITHOUT publishing — "join to watch". */
@@ -143,6 +148,9 @@ export interface PassControlMessage {
 export interface StatusMessage {
   type: "status";
   state: MemberStatus;
+  /** Current local playback position (seconds), for the per-member presence view.
+   *  Optional so older clients (which omit it) still validate. */
+  time?: number;
 }
 
 /** Privileged: drop a stalled/failed member from the gate (SPEC §9). */

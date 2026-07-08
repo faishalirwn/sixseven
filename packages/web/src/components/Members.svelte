@@ -1,13 +1,21 @@
 <script lang="ts">
-  import { Crown } from "lucide-svelte";
-  import type { MemberStatus } from "@mutsu/protocol";
+  import { Crown, RotateCw } from "lucide-svelte";
+  import type { Member, MemberStatus } from "@mutsu/protocol";
   import type { RoomClient } from "../lib/room.svelte";
 
   interface Props {
     room: RoomClient;
+    /** Where the room clock is now (projected) — to show each viewer's drift. */
+    roomNow: number | null;
+    /** Self-resync (one-way) — offered on your own row when you've drifted. */
+    onResync: () => void;
     onInvite: () => void;
   }
-  const { room, onInvite }: Props = $props();
+  const { room, roomNow, onResync, onInvite }: Props = $props();
+
+  // Beyond this (s) a member reads as out of sync. Generous, because a member's
+  // reported position is sampled up to ~2s ago — small gaps aren't real drift.
+  const OUT_OF_SYNC_S = 6;
 
   const statusLabel: Record<MemberStatus, string> = {
     loading: "loading",
@@ -19,19 +27,51 @@
   function canSkip(status: MemberStatus): boolean {
     return room.canControl && (status === "stalled" || status === "failed");
   }
+
+  function fmtPos(t: number): string {
+    const s = Math.max(0, Math.floor(t));
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    const mm = h ? String(m).padStart(2, "0") : String(m);
+    return `${h ? `${h}:` : ""}${mm}:${String(sec).padStart(2, "0")}`;
+  }
+
+  /** Signed drift (s, + = ahead of the room), or null if not comparable. */
+  function driftOf(m: Member): number | null {
+    if (m.time == null || roomNow == null || m.status !== "ready") return null;
+    return m.time - roomNow;
+  }
 </script>
 
 <section>
   <h2>Members <span class="count">{room.members.length}</span></h2>
   <ul>
     {#each room.members as m (m.id)}
+      {@const drift = driftOf(m)}
+      {@const outOfSync = drift !== null && Math.abs(drift) > OUT_OF_SYNC_S}
       <li>
         <span class="dot {m.status}"></span>
         <span class="name">
           {m.name}{#if m.id === room.self}<span class="you"> (you)</span>{/if}
           {#if room.sync?.hostId === m.id}<span class="host" title="host"><Crown size={13} fill="currentColor" /></span>{/if}
         </span>
-        <span class="status {m.status}">{statusLabel[m.status]}</span>
+        {#if m.time != null && m.status === "ready"}
+          {#if outOfSync}
+            <span class="drift" title="Out of sync with the room">
+              {Math.abs(Math.round(drift ?? 0))}s {drift! > 0 ? "ahead" : "behind"}
+            </span>
+          {:else}
+            <span class="pos" title="Playback position">{fmtPos(m.time)}</span>
+          {/if}
+        {:else}
+          <span class="status {m.status}">{statusLabel[m.status]}</span>
+        {/if}
+        {#if m.id === room.self && outOfSync}
+          <button class="resync" onclick={onResync} title="Resync me to the room">
+            <RotateCw size={12} /> resync
+          </button>
+        {/if}
         {#if canSkip(m.status)}
           <button class="skip" onclick={() => room.skip(m.id)}>skip</button>
         {/if}
@@ -135,6 +175,30 @@
   }
   .status.failed {
     color: var(--bad);
+  }
+  .pos {
+    font-size: 11px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .drift {
+    font-size: 11px;
+    font-weight: 600;
+    color: #000;
+    background: var(--warn);
+    border-radius: 999px;
+    padding: 1px 7px;
+    white-space: nowrap;
+  }
+  .resync {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 2px 8px;
+    font-size: 11px;
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
   }
   .skip {
     padding: 2px 8px;

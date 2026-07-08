@@ -203,6 +203,17 @@
     p.apply(sync, gate);
   });
 
+  /** Force-snap this viewer to the room clock (self-resync). One-way: it seeks the
+   *  local element to the server's projected position, emitting no `control`. */
+  export function resyncNow() {
+    const p = player;
+    if (!p || !sync) return;
+    const playing = sync.intent === "playing" && !gate.paused;
+    const want =
+      sync.time + (playing ? ((performance.now() - syncAt) / 1000) * (sync.rate || 1) : 0);
+    p.apply({ ...sync, time: want, force: true }, gate);
+  }
+
   $effect(() => () => teardownHls());
 
   const style = $derived(subs?.style ?? null);
