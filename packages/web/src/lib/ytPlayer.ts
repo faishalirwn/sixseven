@@ -46,7 +46,9 @@ const PLAYING = 1;
 let apiPromise: Promise<unknown> | null = null;
 
 /** Load the YouTube IFrame API once (idempotent); resolves with `window.YT`. */
-export function loadYouTubeApi(): Promise<{ Player: new (el: HTMLElement, opts: unknown) => YtApi }> {
+export function loadYouTubeApi(): Promise<{
+  Player: new (el: HTMLElement, opts: unknown) => YtApi;
+}> {
   if (!apiPromise) {
     apiPromise = new Promise((resolve) => {
       const w = window as unknown as {

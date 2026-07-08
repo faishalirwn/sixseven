@@ -7,7 +7,8 @@
 
 const PATHS: Record<string, string> = {
   // a framed embed / iframe surface
-  embed: '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 8h20"/><path d="M6 4v4"/><path d="M10 4v4"/>',
+  embed:
+    '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 8h20"/><path d="M6 4v4"/><path d="M10 4v4"/>',
   // a direct video file/stream
   video: '<path d="m22 8-6 4 6 4V8Z"/><rect width="14" height="12" x="2" y="6" rx="2" ry="2"/>',
   // a page that merely contains a player

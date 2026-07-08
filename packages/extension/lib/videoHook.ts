@@ -158,7 +158,11 @@ export class VideoHook {
       const t = tt[i];
       if (!t) continue;
       if (t.kind && t.kind !== "subtitles" && t.kind !== "captions") continue;
-      out.push({ id: String(i), label: t.label || t.language || `Track ${i + 1}`, language: t.language || "" });
+      out.push({
+        id: String(i),
+        label: t.label || t.language || `Track ${i + 1}`,
+        language: t.language || "",
+      });
     }
     return out;
   }
@@ -182,26 +186,39 @@ export class VideoHook {
    */
   useTextTrack(id: string | null, onCues: (cues: SubtitleCue[] | null) => void): void {
     const v = this.video;
-    if (!v) return onCues(null);
+    if (!v) {
+      onCues(null);
+      return;
+    }
     const tt = v.textTracks;
     for (let i = 0; i < tt.length; i++) {
       const t = tt[i];
       if (t) t.mode = "disabled";
     }
-    if (id === null) return onCues(null);
+    if (id === null) {
+      onCues(null);
+      return;
+    }
     const track = tt[Number(id)];
-    if (!track) return onCues(null);
+    if (!track) {
+      onCues(null);
+      return;
+    }
     track.mode = "hidden";
     let tries = 0;
     const read = () => {
       // Bail if the video swapped out from under us.
       if (!this.video || this.video.textTracks[Number(id)] !== track) return;
       const cues = track.cues;
-      if (cues && cues.length) {
+      if (cues?.length) {
         const arr: SubtitleCue[] = [];
         for (let i = 0; i < cues.length; i++) {
           const c = cues[i] as VTTCue;
-          arr.push({ start: c.startTime, end: c.endTime, text: (c.text || "").replace(/<[^>]+>/g, "") });
+          arr.push({
+            start: c.startTime,
+            end: c.endTime,
+            text: (c.text || "").replace(/<[^>]+>/g, ""),
+          });
         }
         onCues(arr);
       } else if (tries++ < 30) {
@@ -245,7 +262,9 @@ export class VideoHook {
     }
     if (v.playbackRate !== targetRate) v.playbackRate = targetRate;
     if (snapTo !== null) {
-      dbg(`apply SEEK ${v.currentTime.toFixed(2)}→${snapTo.toFixed(2)} (drift ${signed.toFixed(2)})`);
+      dbg(
+        `apply SEEK ${v.currentTime.toFixed(2)}→${snapTo.toFixed(2)} (drift ${signed.toFixed(2)})`,
+      );
       this.expectSeek = snapTo;
       this.selfSeekAt = performance.now();
       v.currentTime = snapTo;
@@ -493,9 +512,13 @@ export class VideoHook {
     // player moved the clock — the jitter is then theirs, not ours.
     if (this.lastTickTime >= 0 && performance.now() - this.selfSeekAt > SELF_SEEK_QUIET_MS) {
       const delta = v.currentTime - this.lastTickTime;
-      const expected = this.shouldBePlaying() ? (STATUS_REPORT_MS / 1000) * (this.last?.rate ?? 1) : 0;
+      const expected = this.shouldBePlaying()
+        ? (STATUS_REPORT_MS / 1000) * (this.last?.rate ?? 1)
+        : 0;
       if (Math.abs(delta - expected) > 0.5) {
-        dbg(`EMBED moved clock between ticks: Δ${delta.toFixed(2)}s (expected ~${expected.toFixed(2)}s)`);
+        dbg(
+          `EMBED moved clock between ticks: Δ${delta.toFixed(2)}s (expected ~${expected.toFixed(2)}s)`,
+        );
       }
     }
     if (this.state !== "failed") {
