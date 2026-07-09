@@ -6,6 +6,8 @@
 
 **Keep a watch party's video in sync, on any site.**
 
+[**Chrome Web Store**](https://chromewebstore.google.com/detail/mutsu/pniomgcpoioiednjagpdmchjmdfileol) · [**Firefox Add-ons**](https://addons.mozilla.org/en-US/firefox/addon/mutsu/)
+
 </div>
 
 The mutsu extension is the piece that reaches into a video player your browser otherwise

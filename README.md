@@ -6,6 +6,8 @@
 
 **Watch video in sync with friends while you hang out in Discord voice.**
 
+[**Chrome Web Store**](https://chromewebstore.google.com/detail/mutsu/pniomgcpoioiednjagpdmchjmdfileol) · [**Firefox Add-ons**](https://addons.mozilla.org/en-US/firefox/addon/mutsu/)
+
 </div>
 
 A self-hosted watch-party tool. No virtual browser, no screen-sharing, no re-encoding — just a
